@@ -72,7 +72,7 @@ public class Neo4jConcurrentGraphManager {
                     
                     // 创建边
                     tx.run("MATCH (from:Vertex {id: $fromId}), (to:Vertex {id: $toId}) " +
-                           "CREATE (from)-[r:Edge {f1: $f1, f2: $f2, f3: $f3, f4: $f4, f5: $f5, f6: $f6}]->(to)",
+                           "CREATE (from)-[r:Edge {f1: $f1, f2: $f2, f3: $f3, f4: $f4, f5: $f5, f6: $f6, f7: $f7, f8: $f8}]->(to)",
                            Values.parameters("fromId", fromId, "toId", toId, 
                                            "f1", f1, "f2", f2, "f3", f2, "f4", f2, "f5", f2, "f6", f2, "f7", f2, "f8", f2));
                     return null;
@@ -87,11 +87,11 @@ public class Neo4jConcurrentGraphManager {
     }
     
     // 批量插入点
-    public CompletableFuture<Void> insertVerticesBatch(List<String> vertexIds) {
+    public CompletableFuture<Void> insertVerticesBatch(List<Integer> vertexIds) {
         return CompletableFuture.runAsync(() -> {
             try (Session session = driver.session()) {
                 session.writeTransaction(tx -> {
-                    for (String vertexId : vertexIds) {
+                    for (Integer vertexId : vertexIds) {
                         tx.run("MERGE (v:Vertex {id: $id})", Values.parameters("id", vertexId));
                         vertexCounter.incrementAndGet();
                     }
@@ -106,8 +106,8 @@ public class Neo4jConcurrentGraphManager {
     
     // 从文件读取图数据并插入
     public void loadGraphFromFile(String filePath) {
-        List<CompletableFuture<Void>> futures = new ArrayList<>();
-        Set<String> vertices = new HashSet<>();
+        Set<Integer> vertices = new HashSet<>();
+        List<int[]> edges = new ArrayList<>();
         
         try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
             String line;
@@ -117,81 +117,63 @@ public class Neo4jConcurrentGraphManager {
                 
                 String[] parts = line.split("\\s+");
                 if (parts.length >= 2) {
-                    String fromId = parts[0];
-                    String toId = parts[1];
+                    int fromId = Integer.parseInt(parts[0]);
+                    int toId = Integer.parseInt(parts[1]);
                     
                     // 收集所有顶点
                     vertices.add(fromId);
                     vertices.add(toId);
                     
                     // 异步插入边
-                    CompletableFuture<Void> edgeFuture = insertEdgeAsync(fromId, toId, f1, f2, f3, f4, f5, f6);
-                    futures.add(edgeFuture);
+                    edges.add(new int[]{fromId, toId});
                 }
             }
             
-            // 批量插入顶点
-            List<String> vertexList = new ArrayList<>(vertices);
-            int batchSize = 100;
-            for (int i = 0; i < vertexList.size(); i += batchSize) {
-                int end = Math.min(i + batchSize, vertexList.size());
-                List<String> batch = vertexList.subList(i, end);
-                CompletableFuture<Void> vertexFuture = insertVerticesBatch(batch);
-                futures.add(vertexFuture);
-            }
-            
-            // 等待所有操作完成
-            CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
-            
-            System.out.println("图数据加载完成！");
-            System.out.println("总点数: " + vertexCounter.get());
-            System.out.println("总边数: " + edgeCounter.get());
-            
         } catch (IOException e) {
             System.err.println("读取文件失败: " + e.getMessage());
+            return;
         }
-    }
-    
-    // 获取某个点的所有边
-    public List<EdgeInfo> getVertexEdges(String vertexId) {
-        List<EdgeInfo> edges = new ArrayList<>();
-        
-        try (Session session = driver.session()) {
-            Result result = session.run(
-                "MATCH (v:Vertex {id: $vertexId})-[r:Edge]-(other:Vertex) " +
-                "RETURN r, other.id as otherId, " +
-                "CASE WHEN startNode(r) = v THEN 'outgoing' ELSE 'incoming' END as direction",
-                Values.parameters("vertexId", vertexId)
-            );
+
+        System.out.println("文件读取完成，顶点数: " + vertices.size() + ", 边数: " + edges.size());
+
+        // 批量插入顶点
+        System.out.println("开始并发插入顶点...");
+        List<Integer> vertexList = new ArrayList<>(vertices);
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+        int batchSize = 10000;
+        for (int i = 0; i < vertexList.size(); i += batchSize) {
+            int end = Math.min(i + batchSize, vertexList.size());
+            List<Integer> batch = vertexList.subList(i, end);
+            CompletableFuture<Void> vertexFuture = insertVerticesBatch(batch);
+            futures.add(vertexFuture);
+        }
             
-            while (result.hasNext()) {
-                Record record = result.next();
-                Relationship edge = (Relationship) record.get("r").asRelationship();
-                String otherId = record.get("otherId").asString();
-                String direction = record.get("direction").asString();
-                
-                EdgeInfo edgeInfo = new EdgeInfo(
-                    otherId,
-                    direction,
-                    ((Record) edge).get("f1").asString(),
-                    edge.get("f2").asString(),
-                    edge.get("f3").asString(),
-                    edge.get("f4").asString(),
-                    edge.get("f5").asString(),
-                    edge.get("f6").asString()
-                );
-                
-                edges.add(edgeInfo);
-            }
-        } catch (Neo4jException e) {
-            System.err.println("查询顶点边失败: " + e.getMessage());
+        // 等待所有操作完成
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        System.out.println("顶点插入完成！");
+
+        // 并发插入所有边
+        System.out.println("开始并发插入边...");
+        List<CompletableFuture<Void>> edgeFutures = new ArrayList<>();
+        
+        for (int[] edge : edges) {
+            int fromId = edge[0];
+            int toId = edge[1];
+            CompletableFuture<Void> edgeFuture = insertEdgeAsync(fromId, toId);
+            edgeFutures.add(edgeFuture);
         }
         
-        return edges;
+        // 等待所有边插入完成
+        CompletableFuture.allOf(edgeFutures.toArray(new CompletableFuture[0])).join();
+        
+        System.out.println("图数据加载完成！");
+        System.out.println("总点数: " + vertexCounter.get());
+        System.out.println("总边数: " + edgeCounter.get());
+            
     }
     
     // 获取某个点的出边
-    public List<EdgeInfo> getVertexOutgoingEdges(String vertexId) {
+    public List<EdgeInfo> getVertexOutgoingEdges(int vertexId) {
         List<EdgeInfo> edges = new ArrayList<>();
         
         try (Session session = driver.session()) {
@@ -203,18 +185,20 @@ public class Neo4jConcurrentGraphManager {
             
             while (result.hasNext()) {
                 Record record = result.next();
-                Relationship edge = record.get("r").asRelationship();
+                Relationship edge = (Relationship) record.get("r").asRelationship();
                 String otherId = record.get("otherId").asString();
                 
                 EdgeInfo edgeInfo = new EdgeInfo(
                     otherId,
                     "outgoing",
-                    edge.get("f1").asString(),
-                    edge.get("f2").asString(),
-                    edge.get("f3").asString(),
-                    edge.get("f4").asString(),
-                    edge.get("f5").asString(),
-                    edge.get("f6").asString()
+                    ((Record) edge).get("f1").asString(),
+                    ((Record) edge).get("f2").asString(),
+                    ((Record) edge).get("f3").asString(),
+                    ((Record) edge).get("f4").asString(),
+                    ((Record) edge).get("f5").asString(),
+                    ((Record) edge).get("f6").asString(),
+                    ((Record) edge).get("f7").asString(),
+                    ((Record) edge).get("f8").asString()
                 );
                 
                 edges.add(edgeInfo);
@@ -226,41 +210,6 @@ public class Neo4jConcurrentGraphManager {
         return edges;
     }
     
-    // 获取某个点的入边
-    public List<EdgeInfo> getVertexIncomingEdges(String vertexId) {
-        List<EdgeInfo> edges = new ArrayList<>();
-        
-        try (Session session = driver.session()) {
-            Result result = session.run(
-                "MATCH (other:Vertex)-[r:Edge]->(v:Vertex {id: $vertexId}) " +
-                "RETURN r, other.id as otherId",
-                Values.parameters("vertexId", vertexId)
-            );
-            
-            while (result.hasNext()) {
-                Record record = result.next();
-                Relationship edge = record.get("r").asRelationship();
-                String otherId = record.get("otherId").asString();
-                
-                EdgeInfo edgeInfo = new EdgeInfo(
-                    otherId,
-                    "incoming",
-                    edge.get("f1").asString(),
-                    edge.get("f2").asString(),
-                    edge.get("f3").asString(),
-                    edge.get("f4").asString(),
-                    edge.get("f5").asString(),
-                    edge.get("f6").asString()
-                );
-                
-                edges.add(edgeInfo);
-            }
-        } catch (Neo4jException e) {
-            System.err.println("查询顶点入边失败: " + e.getMessage());
-        }
-        
-        return edges;
-    }
     
     // 清空数据库
     public void clearDatabase() {
@@ -291,9 +240,11 @@ public class Neo4jConcurrentGraphManager {
     public static class EdgeInfo {
         private final String connectedVertexId;
         private final String direction;
-        private final String f1, f2, f3, f4, f5, f6;
+        private final String f1, f2, f3, f4, f5, f6, f7, f8;
         
-        public EdgeInfo(String connectedVertexId, String direction, String f1, String f2, String f3, String f4, String f5, String f6) {
+        public EdgeInfo(String connectedVertexId, 
+            String direction, String f1, String f2, String f3,
+            String f4, String f5, String f6, String f7, String f8) {
             this.connectedVertexId = connectedVertexId;
             this.direction = direction;
             this.f1 = f1;
@@ -302,6 +253,8 @@ public class Neo4jConcurrentGraphManager {
             this.f4 = f4;
             this.f5 = f5;
             this.f6 = f6;
+            this.f7 = f7;
+            this.f8 = f8;
         }
         
         // Getters
@@ -313,6 +266,8 @@ public class Neo4jConcurrentGraphManager {
         public String getF4() { return f4; }
         public String getF5() { return f5; }
         public String getF6() { return f6; }
+        public String getF7() { return f7; }
+        public String getF8() { return f8; }
         
         @Override
         public String toString() {
@@ -345,9 +300,9 @@ public class Neo4jConcurrentGraphManager {
             futures.add(manager.insertVertexAsync(2));
             
             // 插入边
-            futures.add(manager.insertEdgeAsync("A", "B", "val1", "val2", "val3", "val4", "val5", "val6"));
-            futures.add(manager.insertEdgeAsync("B", "C", "val7", "val8", "val9", "val10", "val11", "val12"));
-            futures.add(manager.insertEdgeAsync("A", "C", "val13", "val14", "val15", "val16", "val17", "val18"));
+            // futures.add(manager.insertEdgeAsync("A", "B", "val1", "val2", "val3", "val4", "val5", "val6"));
+            // futures.add(manager.insertEdgeAsync("B", "C", "val7", "val8", "val9", "val10", "val11", "val12"));
+            // futures.add(manager.insertEdgeAsync("A", "C", "val13", "val14", "val15", "val16", "val17", "val18"));
             
             // 等待所有操作完成
             CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
@@ -365,26 +320,13 @@ public class Neo4jConcurrentGraphManager {
             System.out.println("\n=== 示例3: 查询点的边 ===");
             Thread.sleep(1000); // 等待插入完成
             
-            // 查询点A的所有边
-            List<EdgeInfo> aEdges = manager.getVertexEdges("A");
-            System.out.println("点A的所有边:");
-            for (EdgeInfo edge : aEdges) {
-                System.out.println("  " + edge);
-            }
-            
-            // 查询点A的出边
-            List<EdgeInfo> aOutEdges = manager.getVertexOutgoingEdges("A");
-            System.out.println("点A的出边:");
+            // 查询点0的出边
+            List<EdgeInfo> aOutEdges = manager.getVertexOutgoingEdges(0);
+            System.out.println("点0的出边:");
             for (EdgeInfo edge : aOutEdges) {
                 System.out.println("  " + edge);
             }
             
-            // 查询点B的入边
-            List<EdgeInfo> bInEdges = manager.getVertexIncomingEdges("B");
-            System.out.println("点B的入边:");
-            for (EdgeInfo edge : bInEdges) {
-                System.out.println("  " + edge);
-            }
             
         } catch (InterruptedException e) {
             System.err.println("程序被中断: " + e.getMessage());
