@@ -52,7 +52,7 @@ public class Neo4jScanAlgorithm {
     public long scan(long vertexNum, int threadsNum, int sub_property) {
         AtomicLong sum = new AtomicLong(0);
         
-        // 定义递归函数
+        // 定义scan函数
         Function<Params, Void> scanFunction = new Function<Params, Void>() {
             @Override
             public Void apply(Params params) {
@@ -75,7 +75,7 @@ public class Neo4jScanAlgorithm {
         // 创建任务列表
         List<CompletableFuture<Void>> futures = new ArrayList<>();
         
-        // 并行执行K-Hop算法
+        // 并行执行算法
         for (long vI = 0; vI < vertexNum; vI ++) {
             final long src = vI;
             CompletableFuture<Void> future = CompletableFuture.runAsync(() -> {
@@ -88,7 +88,7 @@ public class Neo4jScanAlgorithm {
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
         
         long result = sum.get();
-        System.out.println("khop recur sum=" + result);
+        System.out.println("scan sum=" + result);
         return result;
     }
 
